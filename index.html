@@ -294,6 +294,18 @@
       <input type="file" id="importInput" accept="application/json" style="display:none;">
       <button class="btn secondary btn-full" id="importBtn">📥 バックアップから復元</button>
       <hr class="sep">
+      <h4 style="margin:0 0 8px;color:var(--primary-dark);font-size:14px;">📊 Googleスプレッドシート連携</h4>
+      <p class="help-text">保存・編集・削除のたびに、指定したスプレッドシートへ自動で送信します（月ごとの集計はスプレッドシート側で自動計算されます）。設定手順は同梱の google-apps-script.gs を参照してください。</p>
+      <div class="field">
+        <label for="sheetUrlInput">Web App URL</label>
+        <input type="text" id="sheetUrlInput" placeholder="https://script.google.com/macros/s/.../exec">
+      </div>
+      <div class="row" style="margin-bottom:6px;">
+        <button class="btn secondary" id="saveSheetUrlBtn">URLを保存</button>
+        <button class="btn secondary" id="syncAllBtn">全件を今すぐ同期</button>
+      </div>
+      <p class="muted" id="sheetSyncStatus"></p>
+      <hr class="sep">
       <button class="btn danger btn-full" id="clearAllBtn">🗑 全データを削除</button>
     </div>
   </div>
@@ -371,6 +383,46 @@
     t.textContent = msg;
     t.classList.add("show");
     setTimeout(function(){ t.classList.remove("show"); }, 2200);
+  }
+
+  // ---------- Googleスプレッドシート連携 ----------
+  var SHEET_URL_KEY = "kakeibo_sheet_url";
+  function getSheetUrl(){ return localStorage.getItem(SHEET_URL_KEY) || ""; }
+  function setSheetUrl(u){
+    if(u){ localStorage.setItem(SHEET_URL_KEY, u); }
+    else { localStorage.removeItem(SHEET_URL_KEY); }
+  }
+
+  function postToSheet(payload){
+    var url = getSheetUrl();
+    if(!url) return;
+    // Apps Script はCORSプリフライトに対応していないため、text/plainで送信して
+    // シンプルリクエスト扱いにする（レスポンスの中身はno-corsのため読み取れない）。
+    fetch(url, {
+      method: "POST",
+      mode: "no-cors",
+      headers: {"Content-Type": "text/plain;charset=utf-8"},
+      body: JSON.stringify(payload)
+    }).catch(function(){ /* ネットワークエラーは静かに無視。ローカル保存は既に完了している */ });
+  }
+
+  function syncUpsertToSheet(rec){
+    var cat = getCategory(rec.category);
+    postToSheet({
+      action: "upsert",
+      record: {
+        id: rec.id,
+        date: rec.date,
+        category: cat.emoji + " " + cat.label,
+        amount: rec.amount,
+        memo: rec.memo || "",
+        createdAt: rec.createdAt || new Date().toISOString()
+      }
+    });
+  }
+
+  function syncDeleteToSheet(id){
+    postToSheet({ action: "delete", record: { id: id } });
   }
 
   // ---------- タブ切替 ----------
@@ -464,6 +516,7 @@
     };
     records.push(rec);
     saveRecords();
+    syncUpsertToSheet(rec);
     toast("保存しました");
     resetEntryForm();
   });
@@ -779,6 +832,7 @@
     rec.category = selectedEditCategory;
     rec.memo = editMemoInput.value.trim();
     saveRecords();
+    syncUpsertToSheet(rec);
     closeEntryModal();
     renderHistory();
     toast("更新しました");
@@ -787,8 +841,10 @@
   document.getElementById("editDeleteBtn").addEventListener("click", function(){
     if(!editingId) return;
     if(!confirm("この記録を削除します。よろしいですか？")) return;
-    records = records.filter(function(r){ return r.id!==editingId; });
+    var deletedId = editingId;
+    records = records.filter(function(r){ return r.id!==deletedId; });
     saveRecords();
+    syncDeleteToSheet(deletedId);
     closeEntryModal();
     renderHistory();
     toast("削除しました");
@@ -894,9 +950,40 @@
 
   // ---------- 設定（バックアップ/復元/削除） ----------
   var settingsModal = document.getElementById("settingsModal");
-  document.getElementById("settingsBtn").addEventListener("click", function(){ settingsModal.classList.add("show"); });
+  var sheetUrlInput = document.getElementById("sheetUrlInput");
+  var sheetSyncStatus = document.getElementById("sheetSyncStatus");
+
+  document.getElementById("settingsBtn").addEventListener("click", function(){
+    sheetUrlInput.value = getSheetUrl();
+    sheetSyncStatus.textContent = "";
+    settingsModal.classList.add("show");
+  });
   document.getElementById("settingsModalClose").addEventListener("click", function(){ settingsModal.classList.remove("show"); });
   settingsModal.addEventListener("click", function(e){ if(e.target===settingsModal) settingsModal.classList.remove("show"); });
+
+  document.getElementById("saveSheetUrlBtn").addEventListener("click", function(){
+    var v = sheetUrlInput.value.trim();
+    setSheetUrl(v);
+    toast(v ? "URLを保存しました" : "URLをクリアしました");
+  });
+
+  document.getElementById("syncAllBtn").addEventListener("click", function(){
+    if(!getSheetUrl()){ toast("先にWeb App URLを保存してください"); return; }
+    if(records.length===0){ toast("同期する記録がありません"); return; }
+    var total = records.length;
+    var i = 0;
+    function sendNext(){
+      if(i>=total){
+        sheetSyncStatus.textContent = total + "件を送信しました（結果はスプレッドシート側でご確認ください）";
+        return;
+      }
+      syncUpsertToSheet(records[i]);
+      i++;
+      sheetSyncStatus.textContent = "送信中… " + i + " / " + total;
+      setTimeout(sendNext, 200);
+    }
+    sendNext();
+  });
 
   document.getElementById("exportBtn").addEventListener("click", function(){
     var blob = new Blob([JSON.stringify(records, null, 2)], {type:"application/json"});
